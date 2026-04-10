@@ -419,6 +419,216 @@ def api_konum_set():
     except Exception as e:
         return jsonify({"ok": False, "mesaj": str(e)})
 
+# ── EXPORT ROUTES ─────────────────────────────────────────────────────────────
+import io
+from flask import send_file
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+AYLAR = ["","Ocak","Şubat","Mart","Nisan","Mayıs","Haziran",
+         "Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"]
+
+def excel_stil(ws):
+    """Tüm sütunları otomatik genişlet."""
+    for col in ws.columns:
+        max_len = max((len(str(c.value or "")) for c in col), default=10)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 40)
+
+def baslik_stili():
+    return {
+        "font":      Font(bold=True, color="FFFFFF", size=11),
+        "fill":      PatternFill("solid", fgColor="1E3A5F"),
+        "alignment": Alignment(horizontal="center", vertical="center"),
+        "border":    Border(bottom=Side(style="thin", color="FFFFFF"))
+    }
+
+def uygula_stil(cell, **kwargs):
+    for k, v in kwargs.items():
+        setattr(cell, k, v)
+
+def ihlaL_renk(row_cells, giris_u, cikis_u, cikis_d):
+    """İhlal varsa satırı turuncu/sarı yap."""
+    renk = None
+    if cikis_d:  renk = "FFF3E0"   # turuncu tonu
+    elif giris_u or cikis_u: renk = "FFFDE7"  # sarı tonu
+    if renk:
+        for c in row_cells:
+            c.fill = PatternFill("solid", fgColor=renk)
+
+# ── 1. AYLIK EXCEL ────────────────────────────────────────────────────────────
+@app.route("/export/aylik")
+def export_aylik():
+    if not admin_kontrol(request.args.get("s","")):
+        return "Yetkisiz", 401
+    yil = int(request.args.get("yil", date.today().year))
+    ay  = int(request.args.get("ay",  date.today().month))
+    bas, bit = f"{yil}-{ay:02d}-01", f"{yil}-{ay:02d}-31"
+
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT p.ad_soyad, y.tarih, y.giris_saati, y.cikis_saati,
+                   y.giris_uyari, y.cikis_uyari, y.cikis_disari
+            FROM yoklama y JOIN personel p ON p.id=y.personel_id
+            WHERE y.tarih BETWEEN ? AND ? AND p.aktif=1
+            ORDER BY p.ad_soyad, y.tarih
+        """, (bas, bit)).fetchall()
+
+    wb = openpyxl.Workbook()
+
+    # ── ÖZET SAYFASI ──────────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Özet"
+    ws.row_dimensions[1].height = 30
+
+    basliklar = ["Personel","Çalışılan Gün","Toplam Saat","Eksik Çıkış","Mesai İhlali","Klinik Dışı Çıkış","Durum"]
+    st = baslik_stili()
+    for i, b in enumerate(basliklar, 1):
+        c = ws.cell(row=1, column=i, value=b)
+        uygula_stil(c, **st)
+
+    # Personel bazında grupla
+    from collections import defaultdict
+    ozet = defaultdict(lambda: {"gun":0,"dk":0,"eksik_c":0,"mesai":0,"disari":0})
+    for r in rows:
+        ad = r["ad_soyad"]
+        if r["giris_saati"]:
+            ozet[ad]["gun"] += 1
+            dk, _ = sure_hesapla(r["giris_saati"], r["cikis_saati"] or r["giris_saati"], r["tarih"])
+            ozet[ad]["dk"] += dk
+        if not r["cikis_saati"] and r["giris_saati"]: ozet[ad]["eksik_c"] += 1
+        if r["giris_uyari"] or r["cikis_uyari"]:      ozet[ad]["mesai"]   += 1
+        if r["cikis_disari"]:                          ozet[ad]["disari"]  += 1
+
+    for i, (ad, d) in enumerate(ozet.items(), 2):
+        saat_txt = f"{d['dk']//60}s {d['dk']%60}dk"
+        durum = "✅ Normal" if d["mesai"]==0 and d["disari"]==0 else "⚠️ İhlal Var"
+        satirlar = [ad, d["gun"], saat_txt, d["eksik_c"], d["mesai"], d["disari"], durum]
+        for j, v in enumerate(satirlar, 1):
+            c = ws.cell(row=i, column=j, value=v)
+            c.alignment = Alignment(horizontal="center")
+            if d["disari"] > 0 or d["mesai"] > 0:
+                c.fill = PatternFill("solid", fgColor="FFF3E0")
+    excel_stil(ws)
+
+    # ── DETAY SAYFASI ─────────────────────────────────────────────────────────
+    ws2 = wb.create_sheet("Günlük Detay")
+    basliklar2 = ["Personel","Tarih","Gün","Giriş","Çıkış","Çalışma Süresi","Giriş İhlali","Çıkış İhlali","Klinik Dışı"]
+    for i, b in enumerate(basliklar2, 1):
+        c = ws2.cell(row=1, column=i, value=b)
+        uygula_stil(c, **st)
+
+    gun_adlari = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"]
+    for ri, r in enumerate(rows, 2):
+        dk, sure_txt = sure_hesapla(r["giris_saati"] or "", r["cikis_saati"] or "", r["tarih"])
+        try: gun = gun_adlari[date.fromisoformat(r["tarih"]).weekday()]
+        except: gun = ""
+        vals = [
+            r["ad_soyad"], r["tarih"], gun,
+            r["giris_saati"][:5] if r["giris_saati"] else "-",
+            r["cikis_saati"][:5] if r["cikis_saati"] else "-",
+            sure_txt,
+            "Evet" if r["giris_uyari"] else "Hayır",
+            "Evet" if r["cikis_uyari"] else "Hayır",
+            "Evet" if r["cikis_disari"] else "Hayır",
+        ]
+        row_cells = [ws2.cell(row=ri, column=j, value=v) for j, v in enumerate(vals, 1)]
+        for c in row_cells: c.alignment = Alignment(horizontal="center")
+        ihlaL_renk(row_cells, r["giris_uyari"], r["cikis_uyari"], r["cikis_disari"])
+    excel_stil(ws2)
+
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    dosya_adi = f"yoklama_{yil}_{ay:02d}_{AYLAR[ay]}.xlsx"
+    return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     as_attachment=True, download_name=dosya_adi)
+
+# ── 2. TARİH ARALIKLI CSV ─────────────────────────────────────────────────────
+@app.route("/export/csv")
+def export_csv():
+    if not admin_kontrol(request.args.get("s","")):
+        return "Yetkisiz", 401
+    bas = request.args.get("bas", date.today().strftime("%Y-%m-%d"))
+    bit = request.args.get("bit", date.today().strftime("%Y-%m-%d"))
+
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT p.ad_soyad, y.tarih, y.giris_saati, y.cikis_saati,
+                   y.giris_uyari, y.cikis_uyari, y.cikis_disari
+            FROM yoklama y JOIN personel p ON p.id=y.personel_id
+            WHERE y.tarih BETWEEN ? AND ?
+            ORDER BY y.tarih DESC, p.ad_soyad
+        """, (bas, bit)).fetchall()
+
+    import csv
+    buf = io.StringIO()
+    yaz = csv.writer(buf)
+    yaz.writerow(["Personel","Tarih","Giriş","Çıkış","Çalışma Süresi","Giriş İhlali","Çıkış İhlali","Klinik Dışı"])
+    for r in rows:
+        _, sure = sure_hesapla(r["giris_saati"] or "", r["cikis_saati"] or "", r["tarih"])
+        yaz.writerow([
+            r["ad_soyad"], r["tarih"],
+            r["giris_saati"][:5] if r["giris_saati"] else "-",
+            r["cikis_saati"][:5] if r["cikis_saati"] else "-",
+            sure,
+            "Evet" if r["giris_uyari"] else "Hayır",
+            "Evet" if r["cikis_uyari"] else "Hayır",
+            "Evet" if r["cikis_disari"] else "Hayır",
+        ])
+
+    buf.seek(0)
+    bbuf = io.BytesIO(buf.getvalue().encode("utf-8-sig"))  # utf-8-sig = Excel'de Türkçe karakter sorunu olmaz
+    dosya_adi = f"yoklama_{bas}_{bit}.csv"
+    return send_file(bbuf, mimetype="text/csv", as_attachment=True, download_name=dosya_adi)
+
+# ── 3. TÜM ZAMANLAR EXCEL ─────────────────────────────────────────────────────
+@app.route("/export/tumü")
+def export_tumu():
+    if not admin_kontrol(request.args.get("s","")):
+        return "Yetkisiz", 401
+
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT p.ad_soyad, y.tarih, y.giris_saati, y.cikis_saati,
+                   y.giris_uyari, y.cikis_uyari, y.cikis_disari
+            FROM yoklama y JOIN personel p ON p.id=y.personel_id
+            ORDER BY y.tarih DESC, p.ad_soyad
+        """).fetchall()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Tüm Kayıtlar"
+    st = baslik_stili()
+    basliklar = ["Personel","Tarih","Gün","Giriş","Çıkış","Çalışma Süresi","Giriş İhlali","Çıkış İhlali","Klinik Dışı"]
+    for i, b in enumerate(basliklar, 1):
+        c = ws.cell(row=1, column=i, value=b)
+        uygula_stil(c, **st)
+
+    gun_adlari = ["Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi","Pazar"]
+    for ri, r in enumerate(rows, 2):
+        _, sure = sure_hesapla(r["giris_saati"] or "", r["cikis_saati"] or "", r["tarih"])
+        try: gun = gun_adlari[date.fromisoformat(r["tarih"]).weekday()]
+        except: gun = ""
+        vals = [
+            r["ad_soyad"], r["tarih"], gun,
+            r["giris_saati"][:5] if r["giris_saati"] else "-",
+            r["cikis_saati"][:5] if r["cikis_saati"] else "-",
+            sure,
+            "Evet" if r["giris_uyari"] else "Hayır",
+            "Evet" if r["cikis_uyari"] else "Hayır",
+            "Evet" if r["cikis_disari"] else "Hayır",
+        ]
+        row_cells = [ws.cell(row=ri, column=j, value=v) for j, v in enumerate(vals, 1)]
+        for c in row_cells: c.alignment = Alignment(horizontal="center")
+        ihlaL_renk(row_cells, r["giris_uyari"], r["cikis_uyari"], r["cikis_disari"])
+    excel_stil(ws)
+
+    buf = io.BytesIO()
+    wb.save(buf); buf.seek(0)
+    dosya_adi = f"yoklama_tum_kayitlar_{date.today()}.xlsx"
+    return send_file(buf, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     as_attachment=True, download_name=dosya_adi)
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     init_db()
