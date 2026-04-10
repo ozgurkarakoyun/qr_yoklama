@@ -1,6 +1,6 @@
-from flask import Flask, request, jsonify, render_template, redirect, url_for
+from flask import Flask, request, jsonify, render_template, redirect, url_for, send_file
 from datetime import datetime, date
-import sqlite3, hashlib, math, os, pytz
+import sqlite3, hashlib, math, os, pytz, io, csv
 
 app = Flask(__name__)
 
@@ -420,11 +420,13 @@ def api_konum_set():
         return jsonify({"ok": False, "mesaj": str(e)})
 
 # ── EXPORT ROUTES ─────────────────────────────────────────────────────────────
-import io
-from flask import send_file
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    OPENPYXL_OK = True
+except ImportError:
+    OPENPYXL_OK = False
 
 AYLAR = ["","Ocak","Şubat","Mart","Nisan","Mayıs","Haziran",
          "Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"]
@@ -461,6 +463,8 @@ def ihlaL_renk(row_cells, giris_u, cikis_u, cikis_d):
 def export_aylik():
     if not admin_kontrol(request.args.get("s","")):
         return "Yetkisiz", 401
+    if not OPENPYXL_OK:
+        return "openpyxl modülü yüklü değil. requirements.txt kontrol edin.", 500
     yil = int(request.args.get("yil", date.today().year))
     ay  = int(request.args.get("ay",  date.today().month))
     bas, bit = f"{yil}-{ay:02d}-01", f"{yil}-{ay:02d}-31"
@@ -586,6 +590,8 @@ def export_csv():
 def export_tumu():
     if not admin_kontrol(request.args.get("s","")):
         return "Yetkisiz", 401
+    if not OPENPYXL_OK:
+        return "openpyxl modülü yüklü değil. requirements.txt kontrol edin.", 500
 
     with get_db() as conn:
         rows = conn.execute("""
