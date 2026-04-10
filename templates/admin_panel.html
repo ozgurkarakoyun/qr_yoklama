@@ -91,6 +91,7 @@ tr:hover td{background:rgba(255,255,255,.02)}
   <button class="tab"     onclick="tab('personel')">👥 Personel</button>
   <button class="tab"     onclick="tab('qr')">📱 QR Kodlar</button>
   <button class="tab"     onclick="tab('konum')">📍 Konum</button>
+  <button class="tab"     onclick="tab('export')">📥 Export</button>
 </div>
 
 <!-- YOKLAMA -->
@@ -203,12 +204,57 @@ tr:hover td{background:rgba(255,255,255,.02)}
   </div>
 </div>
 
+<!-- EXPORT -->
+<div class="pane" id="p-export">
+  <div class="box">
+    <div class="box-title">📅 Aylık Excel İndir</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:14px">Seçilen aya ait özet + günlük detay sayfalarından oluşan Excel. İhlaller renkli işaretlenir.</p>
+    <div class="row">
+      <select id="eYil"></select>
+      <select id="eAy">
+        <option value="1">Ocak</option><option value="2">Şubat</option>
+        <option value="3">Mart</option><option value="4">Nisan</option>
+        <option value="5">Mayıs</option><option value="6">Haziran</option>
+        <option value="7">Temmuz</option><option value="8">Ağustos</option>
+        <option value="9">Eylül</option><option value="10">Ekim</option>
+        <option value="11">Kasım</option><option value="12">Aralık</option>
+      </select>
+      <button class="btn b-green" onclick="exportAylik()">⬇️ Excel İndir</button>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="box-title">📆 Tarih Aralığı CSV İndir</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:14px">Ham yoklama kayıtları. Excel, SPSS, R gibi programlarda kullanılabilir.</p>
+    <div class="row">
+      <div style="flex:1"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Başlangıç</label><input type="date" id="eBas"></div>
+      <div style="flex:1"><label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Bitiş</label><input type="date" id="eBit"></div>
+      <button class="btn b-blue" style="align-self:flex-end" onclick="exportCSV()">⬇️ CSV İndir</button>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="box-title">🗄️ Tüm Kayıtlar Excel İndir</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:14px">Sistemdeki tüm yoklama kayıtları tek Excel dosyasında. İstatistiksel analiz için idealdir.</p>
+    <button class="btn b-blue" onclick="exportTumu()">⬇️ Tüm Kayıtları İndir</button>
+  </div>
+
+  <div class="box" style="border-color:rgba(59,130,246,.3);background:rgba(59,130,246,.05)">
+    <div class="box-title" style="color:#93c5fd">💡 Excel Renk Açıklaması</div>
+    <div style="font-size:13px;display:flex;flex-direction:column;gap:8px">
+      <div><span style="display:inline-block;width:14px;height:14px;background:#FFF3E0;border:1px solid #ccc;vertical-align:middle;border-radius:2px;margin-right:8px"></span>Turuncu — Klinik dışında çıkış</div>
+      <div><span style="display:inline-block;width:14px;height:14px;background:#FFFDE7;border:1px solid #ccc;vertical-align:middle;border-radius:2px;margin-right:8px"></span>Sarı — Mesai saati ihlali</div>
+      <div><span style="display:inline-block;width:14px;height:14px;background:#fff;border:1px solid #ccc;vertical-align:middle;border-radius:2px;margin-right:8px"></span>Beyaz — Normal kayıt</div>
+    </div>
+  </div>
+</div>
+
 <script>
 const S = "{{ s }}";
 function A(p){ const sep=p.includes("?")?"&":"?"; return p+sep+"s="+S; }
 
 // ── TABS ──────────────────────────────────────────────────────────────────────
-const TABS=["yoklama","aylik","personel","qr","konum"];
+const TABS=["yoklama","aylik","personel","qr","konum","export"];
 function tab(name){
   document.querySelectorAll(".tab").forEach((t,i)=>t.classList.toggle("on",TABS[i]===name));
   document.querySelectorAll(".pane").forEach(p=>p.classList.remove("on"));
@@ -217,6 +263,7 @@ function tab(name){
   if(name==="qr")       loadQR();
   if(name==="konum")    loadKonum();
   if(name==="aylik")    initAylik();
+  if(name==="export")   initExport();
 }
 
 // ── YOKLAMA ───────────────────────────────────────────────────────────────────
@@ -443,6 +490,38 @@ function benimKonum(){
 function haritaGoster(lat,lng){
   const url=`https://www.openstreetmap.org/export/embed.html?bbox=${lng-.005},${lat-.004},${lng+.005},${lat+.004}&layer=mapnik&marker=${lat},${lng}`;
   document.getElementById("harita").innerHTML=`<iframe src="${url}" style="width:100%;height:300px;border:none" loading="lazy"></iframe>`;
+}
+
+// ── EXPORT ────────────────────────────────────────────────────────────────────
+function initExport(){
+  const yilEl=document.getElementById("eYil");
+  if(yilEl.innerHTML) return;
+  const yil=new Date().getFullYear();
+  for(let y=yil;y>=yil-3;y--){
+    const o=document.createElement("option");
+    o.value=y; o.textContent=y; yilEl.appendChild(o);
+  }
+  document.getElementById("eAy").value=new Date().getMonth()+1;
+  document.getElementById("eBas").value=today();
+  document.getElementById("eBit").value=today();
+}
+
+function exportAylik(){
+  const yil=document.getElementById("eYil").value;
+  const ay =document.getElementById("eAy").value;
+  window.location.href=A(`/export/aylik?yil=${yil}&ay=${ay}`);
+}
+
+function exportCSV(){
+  const bas=document.getElementById("eBas").value;
+  const bit=document.getElementById("eBit").value;
+  if(!bas||!bit){ alert("Lütfen tarih aralığı seçin."); return; }
+  window.location.href=A(`/export/csv?bas=${bas}&bit=${bit}`);
+}
+
+function exportTumu(){
+  if(!confirm("Tüm kayıtlar indirilecek. Devam etmek istiyor musunuz?")) return;
+  window.location.href=A("/export/tumü");
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
