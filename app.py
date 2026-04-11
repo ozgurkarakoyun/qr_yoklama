@@ -83,21 +83,25 @@ def get_personel(pin):
             (hash_pin(pin),)
         ).fetchone()
 
-def bugun_yoklama(personel_id, tarih):
+def acik_giris(personel_id, tarih):
+    """Bugün için çıkış yapılmamış (açık) en son giriş kaydını döndürür."""
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM yoklama WHERE personel_id=? AND tarih=?",
+            "SELECT * FROM yoklama WHERE personel_id=? AND tarih=? AND giris_saati IS NOT NULL AND cikis_saati IS NULL ORDER BY id DESC LIMIT 1",
             (personel_id, tarih)
         ).fetchone()
-        if row:
-            return dict(row)
+        return dict(row) if row else None
+
+def yeni_giris_kaydi(personel_id, tarih):
+    """Yeni boş bir yoklama satırı oluşturur ve döndürür."""
+    with get_db() as conn:
         conn.execute(
             "INSERT INTO yoklama (personel_id, tarih) VALUES (?,?)",
             (personel_id, tarih)
         )
         conn.commit()
         return dict(conn.execute(
-            "SELECT * FROM yoklama WHERE personel_id=? AND tarih=?",
+            "SELECT * FROM yoklama WHERE personel_id=? AND tarih=? ORDER BY id DESC LIMIT 1",
             (personel_id, tarih)
         ).fetchone())
 
@@ -178,10 +182,14 @@ def api_giris():
     now   = now_tr()
     tarih = now.strftime("%Y-%m-%d")
     saat  = now.strftime("%H:%M:%S")
-    yoklama = bugun_yoklama(personel["id"], tarih)
 
-    if yoklama["giris_saati"]:
-        return jsonify({"ok": False, "mesaj": f"Bugün zaten giriş yaptınız ({yoklama['giris_saati'][:5]})."})
+    # Açık (çıkış yapılmamış) giriş varsa yeni giriş yapılamaz
+    acik = acik_giris(personel["id"], tarih)
+    if acik:
+        return jsonify({"ok": False, "mesaj": f"Zaten klinikte giriş yaptınız ({acik['giris_saati'][:5]}). Önce çıkış yapınız."})
+
+    # Yeni giriş satırı oluştur
+    yoklama = yeni_giris_kaydi(personel["id"], tarih)
 
     uyari, uyari_mesaj = mesai_kontrol(now, "giris")
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
@@ -228,12 +236,11 @@ def api_cikis():
     now   = now_tr()
     tarih = now.strftime("%Y-%m-%d")
     saat  = now.strftime("%H:%M:%S")
-    yoklama = bugun_yoklama(personel["id"], tarih)
 
-    if not yoklama["giris_saati"]:
-        return jsonify({"ok": False, "mesaj": "Bugün giriş kaydınız bulunamadı."})
-    if yoklama["cikis_saati"]:
-        return jsonify({"ok": False, "mesaj": f"Bugün zaten çıkış yaptınız ({yoklama['cikis_saati'][:5]})."})
+    # Açık (çıkış yapılmamış) giriş kaydını bul
+    yoklama = acik_giris(personel["id"], tarih)
+    if not yoklama:
+        return jsonify({"ok": False, "mesaj": "Aktif giriş kaydınız bulunamadı. Önce giriş yapınız."})
 
     uyari, uyari_mesaj = mesai_kontrol(now, "cikis")
 
@@ -359,23 +366,25 @@ def api_aylik_rapor():
         pid = r["id"]
         if pid not in personeller:
             personeller[pid] = {
-                "ad_soyad":      r["ad_soyad"],
-                "toplam_dk":     0,
-                "calisilan_gun": 0,
-                "eksik_giris":   0,
-                "eksik_cikis":   0,
-                "mesai_uyari":   0,
-                "klinik_disari": 0,
-                "gunler":        []
+                "ad_soyad":       r["ad_soyad"],
+                "toplam_dk":      0,
+                "calisilan_gun":  0,
+                "calisilan_gunler": set(),
+                "eksik_cikis":    0,
+                "mesai_uyari":    0,
+                "klinik_disari":  0,
+                "gunler":         []
             }
         p = personeller[pid]
         dk, sure_text = sure_hesapla(r["giris_saati"] or "", r["cikis_saati"] or "", r["tarih"])
         if r["giris_saati"]:
-            p["calisilan_gun"] += 1
-            p["toplam_dk"]     += dk
-        if not r["giris_saati"]:  p["eksik_giris"]   += 1
-        if not r["cikis_saati"]:  p["eksik_cikis"]   += 1
-        if r["giris_uyari"] or r["cikis_uyari"]: p["mesai_uyari"]   += 1
+            p["toplam_dk"] += dk
+            # Çalışılan günü tarih bazlı say (aynı gün birden fazla giriş olsa bile 1 gün)
+            if r["tarih"] not in p["calisilan_gunler"]:
+                p["calisilan_gunler"].add(r["tarih"])
+                p["calisilan_gun"] += 1
+        if not r["cikis_saati"] and r["giris_saati"]: p["eksik_cikis"] += 1
+        if r["giris_uyari"] or r["cikis_uyari"]: p["mesai_uyari"] += 1
         if r["cikis_disari"]:     p["klinik_disari"] += 1
         p["gunler"].append({
             "tarih":       r["tarih"],
@@ -390,7 +399,8 @@ def api_aylik_rapor():
     sonuc = []
     for pid, p in personeller.items():
         toplam_saat = f"{p['toplam_dk']//60}s {p['toplam_dk']%60}dk"
-        sonuc.append({**p, "toplam_saat": toplam_saat})
+        p_copy = {k:v for k,v in p.items() if k != "calisilan_gunler"}
+        sonuc.append({**p_copy, "toplam_saat": toplam_saat})
     return jsonify(sonuc)
 
 @app.route("/api/admin/qr_urls")
